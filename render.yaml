@@ -14,3 +14,7 @@ services:
         sync: false
       - key: OPENAI_OLLAMA_BASE_URL
         value: https://ollama.com
+      - key: RENDER_SERVICE_ID
+        value: srv-d8q1fn8js32c738mrsv0
+      - key: RENDER_API_KEY
+        sync: false

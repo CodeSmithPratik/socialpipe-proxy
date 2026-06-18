@@ -131,18 +131,6 @@ class ProxyServer {
         }
       }
 
-      // Debug endpoint
-      if (req.url === '/debug') {
-        const ollama = this.config.getProvider('ollama');
-        const allProviders = {};
-        for (const [name, cfg] of this.config.getProviders()) {
-          allProviders[name] = { type: cfg.apiType, keys: cfg.keys.length, baseUrl: cfg.baseUrl, disabled: cfg.disabled };
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ollama, allProviders, openai_ollama_base_url: process.env.OPENAI_OLLAMA_BASE_URL }, null, 2));
-        return;
-      }
-
       // Health check endpoint
       if (req.url === '/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1601,13 +1589,8 @@ fetch('/v1/models').then(r=>r.json()).then(d=>{
   }
 
   getPoolKeyCount() {
-    try {
-      const envPath = path.join(process.cwd(), '.env');
-      const envContent = fs.readFileSync(envPath, 'utf8');
-      const envVars = this.config.parseEnvFile(envContent);
-      const keys = envVars.OPENAI_OLLAMA_API_KEYS || '';
-      return keys.split(',').filter(k => k.trim() && !k.startsWith('~')).length;
-    } catch { return 0; }
+    const ollama = this.config.getProvider('ollama');
+    return ollama ? ollama.keys.length : 0;
   }
 
   getPoolTotalRequests() {
@@ -1640,14 +1623,21 @@ fetch('/v1/models').then(r=>r.json()).then(d=>{
         return;
       }
       const cleanKey = key.trim();
+
+      // Update in-memory env and .env file
       const envPath = path.join(process.cwd(), '.env');
       const envContent = fs.readFileSync(envPath, 'utf8');
       const envVars = this.config.parseEnvFile(envContent);
 
-      const existingKeys = envVars.OPENAI_OLLAMA_API_KEYS || '';
-      const keyList = existingKeys.split(',').map(s => s.trim().replace(/^~/, '')).filter(Boolean);
-      const keySet = new Set(keyList);
+      // Also respect process.env keys (set at runtime on Render)
+      const runtimeKeys = process.env.OPENAI_OLLAMA_API_KEYS || '';
+      const currentKeys = envVars.OPENAI_OLLAMA_API_KEYS || '';
+      const allKeys = [...new Set([
+        ...currentKeys.split(',').map(s => s.trim().replace(/^~/, '')).filter(Boolean),
+        ...runtimeKeys.split(',').map(s => s.trim()).filter(Boolean)
+      ])];
 
+      const keySet = new Set(allKeys);
       if (keySet.has(cleanKey)) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true, count: keySet.size, message: 'Key already in pool' }));
@@ -1655,20 +1645,60 @@ fetch('/v1/models').then(r=>r.json()).then(d=>{
       }
 
       keySet.add(cleanKey);
-      envVars.OPENAI_OLLAMA_API_KEYS = [...keySet].join(',');
-      if (!envVars.OPENAI_OLLAMA_BASE_URL) {
+      const newKeysStr = [...keySet].join(',');
+      envVars.OPENAI_OLLAMA_API_KEYS = newKeysStr;
+      if (!envVars.OPENAI_OLLAMA_BASE_URL && !process.env.OPENAI_OLLAMA_BASE_URL) {
         envVars.OPENAI_OLLAMA_BASE_URL = 'https://ollama.com';
       }
 
       this.writeEnvFile(envVars);
+      // Update runtime env so current instance picks it up
+      process.env.OPENAI_OLLAMA_API_KEYS = newKeysStr;
       this.config.loadConfig();
       this.reinitializeClients();
+
+      // Persist via Render API if configured
+      const renderApiKey = process.env.RENDER_API_KEY;
+      const serviceId = process.env.RENDER_SERVICE_ID;
+      if (renderApiKey && serviceId) {
+        this.persistKeysToRender(renderApiKey, serviceId, newKeysStr).catch(err => {
+          console.log(`[POOL] Failed to persist to Render API: ${err.message}`);
+        });
+      }
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, count: keySet.size }));
     } catch (error) {
       this.sendError(res, 500, 'Failed to add key: ' + error.message);
     }
+  }
+
+  async persistKeysToRender(apiKey, serviceId, keysValue) {
+    const https = require('https');
+    const data = JSON.stringify({ value: keysValue });
+    const url = new URL(`https://api.render.com/v1/services/${serviceId}/env-vars/OPENAI_OLLAMA_API_KEYS`);
+    return new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: url.hostname,
+        path: url.pathname,
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(data)
+        }
+      }, (res) => {
+        let body = '';
+        res.on('data', c => body += c);
+        res.on('end', () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) resolve();
+          else reject(new Error(`Render API returned ${res.statusCode}: ${body}`));
+        });
+      });
+      req.on('error', reject);
+      req.write(data);
+      req.end();
+    });
   }
 
   /**

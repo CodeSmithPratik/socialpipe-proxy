@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: ollama-key-proxy
+    env: node
+    buildCommand: ""
+    startCommand: node index.js
+    healthCheckPath: /
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: OPENAI_OLLAMA_API_KEYS
+        sync: false
+      - key: OPENAI_OLLAMA_BASE_URL
+        value: https://ollama.com/v1

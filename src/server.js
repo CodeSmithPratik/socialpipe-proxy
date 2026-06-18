@@ -131,6 +131,13 @@ class ProxyServer {
         }
       }
 
+      // Health check endpoint
+      if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', poolKeys: this.getPoolKeyCount(), requests: this.getPoolTotalRequests() }));
+        return;
+      }
+
       // Handle root route - redirect to pool
       if (req.url === '/' || req.url === '') {
         res.writeHead(302, { 'Location': '/pool' });

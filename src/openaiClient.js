@@ -15,7 +15,7 @@ class OpenAIClient {
     const failedKeys = []; // Track which keys failed and why
 
     // Determine which status codes should trigger rotation
-    const rotationStatusCodes = customStatusCodes || new Set([429]);
+    const rotationStatusCodes = customStatusCodes || new Set([429, 401, 403]);
 
     // Try each available key for this request
     let apiKey;

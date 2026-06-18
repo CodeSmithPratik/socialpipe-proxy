@@ -131,6 +131,18 @@ class ProxyServer {
         }
       }
 
+      // Debug endpoint
+      if (req.url === '/debug') {
+        const ollama = this.config.getProvider('ollama');
+        const allProviders = {};
+        for (const [name, cfg] of this.config.getProviders()) {
+          allProviders[name] = { type: cfg.apiType, keys: cfg.keys.length, baseUrl: cfg.baseUrl, disabled: cfg.disabled };
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ollama, allProviders, openai_ollama_base_url: process.env.OPENAI_OLLAMA_BASE_URL }, null, 2));
+        return;
+      }
+
       // Health check endpoint
       if (req.url === '/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });

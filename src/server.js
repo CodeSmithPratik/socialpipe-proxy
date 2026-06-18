@@ -13,6 +13,7 @@ class ProxyServer {
     this.providerClients = new Map(); // Map of provider_name -> client instance
     this.server = null;
     this.adminSessionToken = null;
+    this.poolRequestCount = 0;
     this.logBuffer = []; // Store logs in RAM only (last 100 entries)
     this.responseStorage = new Map(); // Store response data for viewing
 
@@ -88,7 +89,8 @@ class ProxyServer {
     }
 
     // Only log to file for API calls, always log to console
-    const isApiCall = this.parseRoute(req.url) !== null;
+    const effectiveUrl = req.url.startsWith('/v1/') ? '/ollama' + req.url : req.url;
+    const isApiCall = this.parseRoute(effectiveUrl) !== null;
     console.log(`[REQ-${requestId}] ${req.method} ${req.url} from ${clientIp}`);
 
     try {
@@ -129,10 +131,21 @@ class ProxyServer {
         }
       }
 
-      // Handle root route - redirect to admin
+      // Handle root route - redirect to pool
       if (req.url === '/' || req.url === '') {
-        res.writeHead(302, { 'Location': '/admin' });
+        res.writeHead(302, { 'Location': '/pool' });
         res.end();
+        return;
+      }
+
+      // Handle public pool routes (no auth required)
+      if (req.url === '/pool' || req.url === '/pool/') {
+        this.servePoolPage(req, res);
+        return;
+      }
+
+      if (req.url.startsWith('/api/pool/')) {
+        await this.handlePoolApiRequest(req, res, body);
         return;
       }
 
@@ -148,7 +161,18 @@ class ProxyServer {
         res.end('Not found');
         return;
       }
-      
+
+      // Pool proxy: /v1/* → /ollama/v1/* (internal rewrite)
+      if (req.url.startsWith('/v1/')) {
+        const ollamaProvider = this.config.getProvider('ollama');
+        if (!ollamaProvider || ollamaProvider.keys.length === 0) {
+          this.sendError(res, 503, 'Ollama pool has no keys. Add one at https://socialpipe-proxy.onrender.com/pool');
+          return;
+        }
+        this.poolRequestCount++;
+        req.url = '/ollama' + req.url;
+      }
+
       const routeInfo = this.parseRoute(req.url);
       
       if (!routeInfo) {
@@ -1451,6 +1475,180 @@ class ProxyServer {
       res.end(html);
     } catch (error) {
       this.sendError(res, 500, 'Admin panel not found');
+    }
+  }
+
+  servePoolPage(req, res) {
+    const count = this.getPoolKeyCount();
+    const totalRequests = this.getPoolTotalRequests();
+    const url = `https://socialpipe-proxy.onrender.com`;
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SocialPipe - Ollama API Pool</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh}
+nav{background:#1e293b;padding:16px 24px;display:flex;align-items:center;gap:16px;border-bottom:1px solid #334155}
+nav h1{font-size:18px;color:#f8fafc}
+nav a{color:#94a3b8;text-decoration:none;font-size:14px;padding:6px 12px;border-radius:6px}
+nav a:hover{background:#334155;color:#f8fafc}
+.container{max-width:720px;margin:0 auto;padding:32px 24px}
+.card{background:#1e293b;border-radius:12px;border:1px solid #334155;padding:24px;margin-bottom:24px}
+.card h2{font-size:16px;color:#f8fafc;margin-bottom:16px}
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:24px}
+.stat{background:#0f172a;border-radius:8px;padding:20px;text-align:center}
+.stat .num{font-size:36px;font-weight:700;color:#38bdf8}
+.stat .label{font-size:13px;color:#94a3b8;margin-top:4px}
+.btn{display:inline-block;padding:10px 20px;border-radius:8px;border:none;font-size:15px;cursor:pointer;font-weight:600}
+.btn-primary{background:#2563eb;color:#fff}
+.btn-primary:hover{background:#1d4ed8}
+.btn-primary:disabled{background:#475569;cursor:not-allowed}
+input[type=text]{width:100%;padding:12px;background:#0f172a;border:1px solid #334155;border-radius:8px;color:#e2e8f0;font-size:14px}
+input[type=text]:focus{outline:none;border-color:#38bdf8}
+code{background:#0f172a;padding:2px 6px;border-radius:4px;font-size:13px;color:#38bdf8}
+.msg{padding:12px;border-radius:8px;margin:12px 0;display:none;font-size:14px}
+.msg.success{display:block;background:#064e3b;border:1px solid #059669;color:#6ee7b7}
+.msg.error{display:block;background:#7f1d1d;border:1px solid #dc2626;color:#fca5a5}
+pre{background:#0f172a;padding:16px;border-radius:8px;font-size:13px;overflow-x:auto;line-height:1.6}
+</style>
+</head>
+<body>
+<nav>
+<h1>SocialPipe</h1>
+<a href="/pool">Pool</a>
+<a target="_blank" href="https://github.com/CodeSmithPratik/socialpipe-proxy">GitHub</a>
+</nav>
+<div class="container">
+<div class="stat-grid">
+<div class="stat"><div class="num" id="keyCount">${count}</div><div class="label">Pool Size</div></div>
+<div class="stat"><div class="num" id="reqCount">${totalRequests}</div><div class="label">Total Requests</div></div>
+</div>
+
+<div class="card">
+<h2>Contribute Your Key</h2>
+<p style="color:#94a3b8;margin-bottom:16px;font-size:14px">Paste your Ollama Cloud API key below to add it to the shared pool. Keys are rotated round-robin and rate limits are shared across all contributors.</p>
+<input type="text" id="apiKey" placeholder="sk-or-v1-..." autocomplete="off" spellcheck="false">
+<div id="msg" class="msg"></div>
+<button class="btn btn-primary" id="submitBtn" onclick="submitKey()">Submit Key</button>
+</div>
+
+<div class="card">
+<h2>How to Use</h2>
+<p style="color:#94a3b8;margin-bottom:12px;font-size:14px">Use this endpoint with any OpenAI-compatible client:</p>
+<pre>POST ${url}/v1/chat/completions
+Authorization: Bearer your-key
+Content-Type: application/json
+
+{
+  "model": "gpt-oss:120b",
+  "messages": [{"role": "user", "content": "Hello"}]
+}</pre>
+</div>
+
+<div class="card">
+<h2>Available Models</h2>
+<div id="modelList" style="font-size:14px;color:#94a3b8">Loading...</div>
+</div>
+</div>
+
+<script>
+async function submitKey(){
+  const key=document.getElementById('apiKey').value.trim();
+  const btn=document.getElementById('submitBtn');
+  const msg=document.getElementById('msg');
+  if(!key){msg.className='msg error';msg.textContent='Please enter an API key';return}
+  btn.disabled=true;btn.textContent='Submitting...'
+  try{
+    const r=await fetch('/api/pool/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key})});
+    const d=await r.json();
+    if(d.success){msg.className='msg success';msg.textContent='Key added! Pool now has '+d.count+' key(s).';document.getElementById('apiKey').value='';document.getElementById('keyCount').textContent=d.count}
+    else{msg.className='msg error';msg.textContent=d.error||'Failed to add key'}
+  }catch(e){msg.className='msg error';msg.textContent='Network error'}
+  btn.disabled=false;btn.textContent='Submit Key'
+}
+fetch('/api/pool/stats').then(r=>r.json()).then(d=>{document.getElementById('reqCount').textContent=d.totalRequests});
+fetch('/v1/models').then(r=>r.json()).then(d=>{
+  const list=document.getElementById('modelList');
+  if(d.data&&d.data.length){list.innerHTML=d.data.map(m=>'<div style=\"padding:4px 0\">• '+m.id+'</div>').join('')}
+  else{list.textContent='Failed to load models'}
+}).catch(()=>document.getElementById('modelList').textContent='Failed to load models');
+</script>
+</body>
+</html>`);
+  }
+
+  getPoolKeyCount() {
+    try {
+      const envPath = path.join(process.cwd(), '.env');
+      const envContent = fs.readFileSync(envPath, 'utf8');
+      const envVars = this.config.parseEnvFile(envContent);
+      const keys = envVars.OPENAI_OLLAMA_API_KEYS || '';
+      return keys.split(',').filter(k => k.trim() && !k.startsWith('~')).length;
+    } catch { return 0; }
+  }
+
+  getPoolTotalRequests() {
+    return this.poolRequestCount;
+  }
+
+  async handlePoolApiRequest(req, res, body) {
+    const url = new URL(req.url, 'http://localhost');
+    const path = url.pathname;
+
+    if (path === '/api/pool/submit' && req.method === 'POST') {
+      await this.handlePoolSubmit(req, res, body);
+    } else if (path === '/api/pool/stats' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        keyCount: this.getPoolKeyCount(),
+        totalRequests: this.getPoolTotalRequests()
+      }));
+    } else {
+      this.sendError(res, 404, 'Not found');
+    }
+  }
+
+  async handlePoolSubmit(req, res, body) {
+    try {
+      const { key } = JSON.parse(body);
+      if (!key || typeof key !== 'string' || key.trim().length < 10) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: 'Invalid API key' }));
+        return;
+      }
+      const cleanKey = key.trim();
+      const envPath = path.join(process.cwd(), '.env');
+      const envContent = fs.readFileSync(envPath, 'utf8');
+      const envVars = this.config.parseEnvFile(envContent);
+
+      const existingKeys = envVars.OPENAI_OLLAMA_API_KEYS || '';
+      const keyList = existingKeys.split(',').map(s => s.trim().replace(/^~/, '')).filter(Boolean);
+      const keySet = new Set(keyList);
+
+      if (keySet.has(cleanKey)) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, count: keySet.size, message: 'Key already in pool' }));
+        return;
+      }
+
+      keySet.add(cleanKey);
+      envVars.OPENAI_OLLAMA_API_KEYS = [...keySet].join(',');
+      if (!envVars.OPENAI_OLLAMA_BASE_URL) {
+        envVars.OPENAI_OLLAMA_BASE_URL = 'https://ollama.com';
+      }
+
+      this.writeEnvFile(envVars);
+      this.config.loadConfig();
+      this.reinitializeClients();
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, count: keySet.size }));
+    } catch (error) {
+      this.sendError(res, 500, 'Failed to add key: ' + error.message);
     }
   }
 

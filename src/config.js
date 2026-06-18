@@ -24,11 +24,18 @@ class Config {
     }
 
     const envContent = fs.readFileSync(envPath, 'utf8');
-    const envVars = this.parseEnvFile(envContent);
+    const fileVars = this.parseEnvFile(envContent);
+    const envVars = { ...fileVars };
+    // Runtime process.env overrides .env file (critical for Render platform)
+    for (const key of Object.keys(process.env)) {
+      if (key in envVars || key.endsWith('_API_KEYS') || key.endsWith('_BASE_URL') || key.endsWith('_ACCESS_KEY') || key.endsWith('_DISABLED')) {
+        envVars[key] = process.env[key];
+      }
+    }
 
-    // Resolve port: .env takes priority, then process.env, then fail
-    const port = envVars.PORT || process.env.PORT;
-    const adminPassword = envVars.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD;
+    // Resolve port: process.env takes priority, then .env, then fail
+    const port = process.env.PORT || envVars.PORT;
+    const adminPassword = process.env.ADMIN_PASSWORD || envVars.ADMIN_PASSWORD;
 
     const missingFields = [];
     if (!port) missingFields.push('PORT');
